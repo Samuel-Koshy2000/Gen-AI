@@ -1,9 +1,20 @@
 # backend/config.py
+
+# Mapping of council roles to physical machines (via Tailscale)
 COUNCIL_MEMBERS = {
-    "Member_1": {"url": "https://5b828916775c.ngrok-free.app", "model": "gemma2:2b"},
-    "Member_2": {"url": "https://wrongfully-gonidioid-alexzander.ngrok-free.dev", "model": "codegemma:2b"},
-    "Chairman": {"url": "http://localhost:11434", "model": "llama3.2:1b"}
+    "Council_1": {
+        "url": "http://100.64.243.5:11434",   # laptop-ra4u7g00
+        "model": "gemma2:2b"
+    }
 }
 
-COUNCIL_MODELS = ["Member_1", "Member_2"]
-CHAIRMAN_MODEL = "Chairman"
+CHAIRMAN = {
+    "url": "http://100.120.97.23:11434",      # samuel-pc
+    "model": "llama3.2:1b"
+}
+
+# Timeout kept high to tolerate cold starts
+REQUEST_TIMEOUT = None
+
+# Maximum history entries injected into prompts
+MAX_HISTORY_MESSAGES = 6
