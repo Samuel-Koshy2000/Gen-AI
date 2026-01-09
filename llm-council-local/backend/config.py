@@ -9,7 +9,7 @@ COUNCIL_MEMBERS = {
 }
 
 CHAIRMAN = {
-    "url": "http://100.114.119.33:11434",      # abhi
+    "url": "http://100.120.97.23:11434",      # samuel-pc
     "model": "llama3.2:3b"
 }
 
