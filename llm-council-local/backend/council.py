@@ -2,79 +2,123 @@
 import httpx
 import asyncio
 import time
-from backend.config import COUNCIL_MEMBERS, COUNCIL_MODELS, CHAIRMAN_MODEL
 
-async def call_node(name, prompt):
-    node = COUNCIL_MEMBERS[name]
+from backend.config import (
+    COUNCIL_MEMBERS,
+    CHAIRMAN,
+    REQUEST_TIMEOUT,
+    MAX_HISTORY_MESSAGES
+)
+from backend.memory_manager import build_context, save_memory
+
+
+async def call_ollama(url, model, prompt):
     start = time.time()
-    # Using timeout=None to handle the 54s cold-start lag without crashing
     try:
-        async with httpx.AsyncClient(timeout=None) as client:
-            res = await client.post(
-                f"{node['url']}/api/generate", 
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            response = await client.post(
+                f"{url}/api/generate",
                 json={
-                    "model": node['model'], 
-                    "prompt": prompt, 
-                    "stream": False,
-                    "keep_alive": -1 # Instructs Ollama to keep model in VRAM
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": False
                 }
             )
-            
-            if res.status_code == 200:
-                return {
-                    "response": res.json().get("response", "No response content"), 
-                    "latency": round(time.time() - start, 2)
-                }
-            else:
-                return {"response": f"Node Error {res.status_code}", "latency": 0}
+            response.raise_for_status()
+            data = response.json()
+            return {
+                "response": data.get("response", ""),
+                "latency": round(time.time() - start, 2)
+            }
     except Exception as e:
-        return {"response": f"Connection Error: {str(e)}", "latency": 0}
+        return {
+            "response": f"ERROR: {str(e)}",
+            "latency": 0
+        }
 
-async def run_council_stages(current_query, chat_history=[]):
-    """
-    Args:
-        current_query (str): The latest user message.
-        chat_history (list): List of dicts [{"role": "user", "content": "..."}, ...]
-    """
-    
-    # --- MEMORY INJECTION ---
-    # We summarize the history into a single block to save tokens
-    context_memory = ""
-    if chat_history:
-        # We only take the last 3 exchanges to keep the prompt lean for Llama 3.2
-        recent_history = chat_history[-6:] 
-        context_memory = "PAST CONVERSATION HISTORY:\n"
-        for msg in recent_history:
-            role = "User" if msg["role"] == "user" else "Council"
-            context_memory += f"{role}: {msg['content'][:200]}...\n"
-        context_memory += "\n--- END OF HISTORY ---\n"
 
-    # The full prompt for the nodes now includes the context memory
-    full_prompt = f"{context_memory}\nNew User Query: {current_query}\n\nPlease provide your expert opinion based on the context above."
+async def stage_one_opinions(query, context):
+    tasks = {}
+    for name, node in COUNCIL_MEMBERS.items():
+        prompt = (
+            f"{context}"
+            f"User Question:\n{query}\n\n"
+            "Provide your independent expert answer."
+        )
+        tasks[name] = call_ollama(node["url"], node["model"], prompt)
 
-    # STAGE 1: FIRST OPINIONS
-    tasks = [call_node(m, full_prompt) for m in COUNCIL_MODELS]
-    stage1_results = await asyncio.gather(*tasks)
-    opinions = {m: r for m, r in zip(COUNCIL_MODELS, stage1_results)}
+    results = await asyncio.gather(*tasks.values())
+    return dict(zip(tasks.keys(), results))
 
-    # STAGE 2: PEER REVIEW (Simplified for Speed)
+
+async def stage_two_reviews(query, opinions):
     reviews = {}
-    for reviewer in COUNCIL_MODELS:
-        others = [f"Peer Ans: {opinions[m]['response'][:400]}" for m in COUNCIL_MODELS if m != reviewer]
-        review_prompt = f"Topic: {current_query}\n" + "\n".join(others) + "\nRate quality 1-10."
-        reviews[reviewer] = await call_node(reviewer, review_prompt)
+    for reviewer, node in COUNCIL_MEMBERS.items():
+        anonymized = []
+        for name, content in opinions.items():
+            if name != reviewer:
+                anonymized.append(f"Response:\n{content['response'][:500]}")
 
-    # STAGE 3: CHAIRMAN SYNTHESIS
-    summary = "\n".join([f"Node {i}: {opinions[m]['response'][:500]}" for i, m in enumerate(COUNCIL_MODELS)])
-    ranking = "\n".join([f"Review {i}: {r['response'][:200]}" for i, r in enumerate(reviews.values())])
+        prompt = (
+            f"User Question:\n{query}\n\n"
+            "You are reviewing anonymous peer answers.\n"
+            + "\n\n".join(anonymized)
+            + "\n\nRate each response (1–10) based on accuracy and insight."
+        )
 
-    final_prompt = (
-        f"You are the Council Chairman. {context_memory}\n"
-        f"Latest Query: {current_query}\n\n"
-        f"Member Perspectives:\n{summary}\n\n"
-        f"Peer Evaluations:\n{ranking}\n\n"
-        f"Synthesize the final authoritative answer, maintaining consistency with previous history."
+        reviews[reviewer] = await call_ollama(
+            node["url"], node["model"], prompt
+        )
+
+    return reviews
+
+
+async def stage_three_chairman(query, context, opinions, reviews):
+    compiled_opinions = "\n".join(
+        f"{name}: {data['response'][:600]}"
+        for name, data in opinions.items()
     )
-    
-    final = await call_node(CHAIRMAN_MODEL, final_prompt)
-    return {"opinions": opinions, "reviews": reviews, "final": final}
+
+    compiled_reviews = "\n".join(
+        f"{name}: {data['response'][:300]}"
+        for name, data in reviews.items()
+    )
+
+    prompt = (
+        f"{context}"
+        f"User Question:\n{query}\n\n"
+        "Council Member Answers:\n"
+        f"{compiled_opinions}\n\n"
+        "Peer Reviews:\n"
+        f"{compiled_reviews}\n\n"
+        "As Chairman, synthesize a single authoritative final answer."
+    )
+
+    return await call_ollama(
+        CHAIRMAN["url"],
+        CHAIRMAN["model"],
+        prompt
+    )
+
+
+async def run_council(query, history=None):
+    context = build_context()
+
+    if history:
+        recent = history[-MAX_HISTORY_MESSAGES:]
+        context += "RECENT CHAT HISTORY:\n"
+        for msg in recent:
+            context += f"{msg['role']}: {msg['content'][:200]}\n"
+        context += "\n"
+
+    opinions = await stage_one_opinions(query, context)
+    reviews = await stage_two_reviews(query, opinions)
+    final = await stage_three_chairman(query, context, opinions, reviews)
+
+    save_memory(query, final["response"])
+
+    return {
+        "opinions": opinions,
+        "reviews": reviews,
+        "final": final
+    }
