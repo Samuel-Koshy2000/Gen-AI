@@ -9,8 +9,8 @@ COUNCIL_MEMBERS = {
 }
 
 CHAIRMAN = {
-    "url": "http://100.120.97.23:11434",      # samuel-pc
-    "model": "llama3.2:1b"
+    "url": "http://100.114.119.33:11434",      # abhi
+    "model": "llama3.2:3b"
 }
 
 # Timeout kept high to tolerate cold starts
